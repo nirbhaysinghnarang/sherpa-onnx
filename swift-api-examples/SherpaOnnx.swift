@@ -1140,75 +1140,287 @@ func sherpaOnnxOfflineSpeakerDiarizationConfig(
   embedding: SherpaOnnxSpeakerEmbeddingExtractorConfig,
   clustering: SherpaOnnxFastClusteringConfig,
   minDurationOn: Float = 0.3,
-  minDurationOff: Float = 0.5
+  minDurationOff: Float = 0.5,
+  extractSpeakerEmbeddings: Bool = false
 ) -> SherpaOnnxOfflineSpeakerDiarizationConfig {
   return SherpaOnnxOfflineSpeakerDiarizationConfig(
     segmentation: segmentation,
     embedding: embedding,
     clustering: clustering,
     min_duration_on: minDurationOn,
-    min_duration_off: minDurationOff
+    min_duration_off: minDurationOff,
+    extract_speaker_embeddings: extractSpeakerEmbeddings
   )
 }
-
 struct SherpaOnnxOfflineSpeakerDiarizationSegmentWrapper {
-  var start: Float = 0
-  var end: Float = 0
-  var speaker: Int = 0
+    var start: Float = 0
+    var end: Float = 0
+    var speaker: Int = 0
+    var embedding: [Float]? = nil
 }
 
 class SherpaOnnxOfflineSpeakerDiarizationWrapper {
-  /// A pointer to the underlying counterpart in C
-  let impl: OpaquePointer!
-
-  init(
-    config: UnsafePointer<SherpaOnnxOfflineSpeakerDiarizationConfig>!
-  ) {
-    impl = SherpaOnnxCreateOfflineSpeakerDiarization(config)
-  }
-
-  deinit {
-    if let impl {
-      SherpaOnnxDestroyOfflineSpeakerDiarization(impl)
+    let impl: OpaquePointer!
+    
+    init(config: UnsafePointer<SherpaOnnxOfflineSpeakerDiarizationConfig>!) {
+        impl = SherpaOnnxCreateOfflineSpeakerDiarization(config)
     }
-  }
-
-  var sampleRate: Int {
-    return Int(SherpaOnnxOfflineSpeakerDiarizationGetSampleRate(impl))
-  }
-
-  // only config.clustering is used. All other fields are ignored
-  func setConfig(config: UnsafePointer<SherpaOnnxOfflineSpeakerDiarizationConfig>!) {
-    SherpaOnnxOfflineSpeakerDiarizationSetConfig(impl, config)
-  }
-
-  func process(samples: [Float]) -> [SherpaOnnxOfflineSpeakerDiarizationSegmentWrapper] {
-    let result = SherpaOnnxOfflineSpeakerDiarizationProcess(
-      impl, samples, Int32(samples.count))
-
-    if result == nil {
-      return []
+    
+    deinit {
+        if let impl {
+            SherpaOnnxDestroyOfflineSpeakerDiarization(impl)
+        }
     }
-
-    let numSegments = Int(SherpaOnnxOfflineSpeakerDiarizationResultGetNumSegments(result))
-
-    let p: UnsafePointer<SherpaOnnxOfflineSpeakerDiarizationSegment>? =
-      SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime(result)
-
-    if p == nil {
-      return []
+    
+    var sampleRate: Int {
+        return Int(SherpaOnnxOfflineSpeakerDiarizationGetSampleRate(impl))
     }
-
-    var ans: [SherpaOnnxOfflineSpeakerDiarizationSegmentWrapper] = []
-    for i in 0..<numSegments {
-      ans.append(
-        SherpaOnnxOfflineSpeakerDiarizationSegmentWrapper(
-          start: p![i].start, end: p![i].end, speaker: Int(p![i].speaker)))
+    
+    func setConfig(config: UnsafePointer<SherpaOnnxOfflineSpeakerDiarizationConfig>!) {
+        SherpaOnnxOfflineSpeakerDiarizationSetConfig(impl, config)
     }
+    
+    func process(samples: [Float]) -> [SherpaOnnxOfflineSpeakerDiarizationSegmentWrapper] {
+        let result = SherpaOnnxOfflineSpeakerDiarizationProcess(
+            impl, samples, Int32(samples.count)
+        )
+        
+        if result == nil {
+            return []
+        }
+        
+        let numSegments = Int(SherpaOnnxOfflineSpeakerDiarizationResultGetNumSegments(result))
+        let numSpeakers = Int(SherpaOnnxOfflineSpeakerDiarizationResultGetNumSpeakers(result))
+        
+        let p: UnsafePointer<SherpaOnnxOfflineSpeakerDiarizationSegment>? =
+            SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime(result)
+        
+        if p == nil {
+            return []
+        }
+        
+        var ans: [SherpaOnnxOfflineSpeakerDiarizationSegmentWrapper] = []
+        
+        // Store speaker embeddings
+        var speakerEmbeddings: [Int: [Float]] = [:]
+        
+        
+        
+        for speaker in 0..<numSpeakers {
+            var numEmbeddings: Int32 = 0
+            var embeddingsPtr: UnsafeMutablePointer<Float>?
+            
+            SherpaOnnxOfflineSpeakerDiarizationResultGetSpeakerEmbeddings(
+                result,
+                Int32(speaker),
+                &embeddingsPtr,
+                &numEmbeddings
+            )
+            
+            if let ptr = embeddingsPtr {
+                let buffer = UnsafeBufferPointer(start: ptr, count: Int(numEmbeddings))
+                speakerEmbeddings[speaker] = Array(buffer)
+                SherpaOnnxOfflineSpeakerDiarizationResultFreeSpeakerEmbeddings(ptr)
+            }
+        }
+        
+        // Create segments with embeddings
+        for i in 0..<numSegments {
+            let speaker = Int(p![i].speaker)
+            ans.append(
+                SherpaOnnxOfflineSpeakerDiarizationSegmentWrapper(
+                    start: p![i].start,
+                    end: p![i].end,
+                    speaker: speaker,
+                    embedding: speakerEmbeddings[speaker]
+                )
+            )
+        }
+        
+        SherpaOnnxOfflineSpeakerDiarizationDestroySegment(p)
+        SherpaOnnxOfflineSpeakerDiarizationDestroyResult(result)
+        
+        return ans
+    }
+}
 
-    SherpaOnnxOfflineSpeakerDiarizationDestroySegment(p)
-    SherpaOnnxOfflineSpeakerDiarizationDestroyResult(result)
+struct SpeakerMatch {
+    let name: String
+    let score: Float
+}
 
-    return ans
-  }
+// MARK: - Embedding Extractor
+
+class SherpaOnnxSpeakerEmbeddingWrapper {
+    /// A pointer to the underlying counterpart in C
+    let extractor: OpaquePointer!
+    
+    init?(config: UnsafePointer<SherpaOnnxSpeakerEmbeddingExtractorConfig>!) {
+        extractor = SherpaOnnxCreateSpeakerEmbeddingExtractor(config)
+        guard extractor != nil else { return nil }
+    }
+    
+    deinit {
+        if let extractor {
+            SherpaOnnxDestroySpeakerEmbeddingExtractor(extractor)
+        }
+    }
+    
+    /// Get the embedding dimension
+    var embeddingDim: Int32 {
+        return SherpaOnnxSpeakerEmbeddingExtractorDim(extractor)
+    }
+    
+    /// Create a stream for online processing
+    func createStream() -> OpaquePointer? {
+        return SherpaOnnxSpeakerEmbeddingExtractorCreateStream(extractor)
+    }
+    
+    /// Check if stream has enough features for embedding computation
+    func isReady(stream: OpaquePointer) -> Bool {
+        return SherpaOnnxSpeakerEmbeddingExtractorIsReady(extractor, stream) == 1
+    }
+    
+    /// Compute embedding from a stream
+    func computeEmbedding(stream: OpaquePointer) -> [Float]? {
+        guard let ptr = SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding(extractor, stream) else {
+            return nil
+        }
+        
+        let embedding = Array(UnsafeBufferPointer(start: ptr, count: Int(embeddingDim)))
+        SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding(ptr)
+        
+        return embedding
+    }
+}
+
+// MARK: - Embedding Manager
+func sherpaOnnxSpeakerEmbeddingConfig(
+    model: String,
+    numThreads: Int = 1,
+    debug: Int = 0,
+    provider: String = "cpu"
+) -> SherpaOnnxSpeakerEmbeddingExtractorConfig {
+    return SherpaOnnxSpeakerEmbeddingExtractorConfig(
+        model: toCPointer(model),
+        num_threads: Int32(numThreads),
+        debug: Int32(debug),
+        provider: toCPointer(provider)
+    )
+}
+
+
+class SherpaOnnxSpeakerEmbeddingManagerWrapper {
+    /// A pointer to the underlying counterpart in C
+    let manager: OpaquePointer!
+    
+    init?(dim: Int32) {
+        manager = SherpaOnnxCreateSpeakerEmbeddingManager(dim)
+        guard manager != nil else { return nil }
+    }
+    
+    deinit {
+        if let manager {
+            SherpaOnnxDestroySpeakerEmbeddingManager(manager)
+        }
+    }
+    
+    /// Add a single embedding for a speaker
+    @discardableResult
+    func add(name: String, embedding: [Float]) -> Bool {
+        return SherpaOnnxSpeakerEmbeddingManagerAdd(manager, toCPointer(name), embedding) == 1
+    }
+    
+    /// Add multiple embeddings for a speaker
+    @discardableResult
+    func addList(name: String, embeddings: [[Float]]) -> Bool {
+        var pointers: [UnsafePointer<Float>?] = embeddings.map { $0.withUnsafeBufferPointer { $0.baseAddress } }
+        pointers.append(nil) // Null terminator
+        
+        return SherpaOnnxSpeakerEmbeddingManagerAddList(manager, toCPointer(name), &pointers) == 1
+    }
+    
+    /// Add multiple embeddings for a speaker using flattened array
+    @discardableResult
+    func addListFlattened(name: String, embeddings: [Float], count: Int32) -> Bool {
+        return SherpaOnnxSpeakerEmbeddingManagerAddListFlattened(
+            manager,
+            toCPointer(name),
+            embeddings,
+            count
+        ) == 1
+    }
+    
+    /// Remove a speaker
+    @discardableResult
+    func remove(name: String) -> Bool {
+        return SherpaOnnxSpeakerEmbeddingManagerRemove(manager, toCPointer(name)) == 1
+    }
+    
+    /// Search for matching speaker
+    func search(embedding: [Float], threshold: Float) -> String? {
+        guard let namePtr = SherpaOnnxSpeakerEmbeddingManagerSearch(manager, embedding, threshold) else {
+            return nil
+        }
+        let name = String(cString: namePtr)
+        SherpaOnnxSpeakerEmbeddingManagerFreeSearch(namePtr)
+        return name
+    }
+    
+    /// Get best matching speakers
+    func getBestMatches(embedding: [Float], threshold: Float, count: Int32) -> [SpeakerMatch] {
+        guard let result = SherpaOnnxSpeakerEmbeddingManagerGetBestMatches(
+            manager,
+            embedding,
+            threshold,
+            count
+        ) else {
+            return []
+        }
+        
+        var matches: [SpeakerMatch] = []
+        for i in 0..<result.pointee.count {
+            let match = result.pointee.matches[Int(i)]
+            matches.append(SpeakerMatch(
+                name: String(cString: match.name),
+                score: match.score
+            ))
+        }
+        
+        SherpaOnnxSpeakerEmbeddingManagerFreeBestMatches(result)
+        return matches
+    }
+    
+    /// Verify if embedding matches a specific speaker
+    func verify(name: String, embedding: [Float], threshold: Float) -> Bool {
+        return SherpaOnnxSpeakerEmbeddingManagerVerify(manager, toCPointer(name), embedding, threshold) == 1
+    }
+    
+    /// Check if speaker exists
+    func contains(name: String) -> Bool {
+        return SherpaOnnxSpeakerEmbeddingManagerContains(manager, toCPointer(name)) == 1
+    }
+    
+    /// Get number of registered speakers
+    var numSpeakers: Int32 {
+        return SherpaOnnxSpeakerEmbeddingManagerNumSpeakers(manager)
+    }
+    
+    /// Get all registered speaker names
+    func getAllSpeakers() -> [String] {
+        guard let namesPtr = SherpaOnnxSpeakerEmbeddingManagerGetAllSpeakers(manager) else {
+            return []
+        }
+        
+        var names: [String] = []
+        var index = 0
+        
+        while let namePtr = namesPtr[index] {
+            names.append(String(cString: namePtr))
+            index += 1
+        }
+        
+        SherpaOnnxSpeakerEmbeddingManagerFreeAllSpeakers(namesPtr)
+        return names
+    }
 }
